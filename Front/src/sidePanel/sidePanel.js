@@ -118,7 +118,7 @@ function initializeRecordsArea() {
             showLoadingState();
 
             // 调用后端 group_nodes API
-            const groupResponse = await fetch('http://localhost:8000/group/', {
+            const groupResponse = await fetch(`http://localhost:8000/group/?scenario=${encodeURIComponent(taskDescription)}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -192,7 +192,8 @@ function initializeRecordsArea() {
                 networkManager = await window.showNetworkVisualization(
                     intentTree, 
                     document.getElementById('networkVisualizationContainer'),
-                    'sidepanel'
+                    'sidepanel',
+                    'hierarchical'
                 );
             } else {
                 networkManager.updateData(intentTree);

@@ -2,11 +2,13 @@
 class NetworkManager {
     static activeNodeMenu = false;  // 跟踪节点菜单状态
     static immutableIntents = new Set();  // 存储所有 immutable 的意图名称
+    static hierarchicalDirection = 'LR';  // 存储层级布局方向配置
 
-    constructor(intentTree, containerArea = null, mode = 'standalone') {
+    constructor(intentTree, containerArea = null, mode = 'standalone', layout = 'force') {
         this.intentTree = intentTree;
         this.containerArea = containerArea;
         this.displayMode = mode;
+        this.layout = layout;
         this.nodes = new vis.DataSet();
         this.edges = new vis.DataSet();
         this.nodeStates = new Map();
@@ -160,15 +162,28 @@ class NetworkManager {
 
         // 添加根节点
         const rootId = 'root';
+        const rootSize = this.getNodeSize('root');
+        const padding = 30;
         const rootNode = {
             id: rootId,
-            label: intentTree.scenario || 'Current Task',
+            label: this.wrapLabelVertical(intentTree.scenario || 'Current Task'),
             type: 'root',
             color: this.getNodeColor('root'),
-            size: this.getNodeSize('root'),
+            size: rootSize,
             opacity: 1,
             fixed: true,
-            physics: false
+            physics: false,
+            font: { 
+                size: 14,
+                align: 'center',
+                multi: true,
+                face: 'system-ui, -apple-system, sans-serif',
+                color: '#333333',
+                yalign: 'middle',
+                ygap: 3,
+                x: -(rootSize + padding),
+                y: 0
+            }
         };
         nodes.push(rootNode);
         
@@ -187,7 +202,7 @@ class NetworkManager {
             
             nodes.push({
                 id: intentId,
-                label: intentName,
+                label: this.wrapLabel(intentName, 15, 'intent'),
                 type: 'intent',
                 color: this.getNodeColor('intent'),
                 size: this.getNodeSize('intent'),
@@ -211,7 +226,7 @@ class NetworkManager {
                     const recordId = `record_${nodeId++}`;
                     const recordNode = {
                         id: recordId,
-                        label: this.truncateText(record.content || record.text || record.description || 'No content', 30),
+                        label: this.wrapLabel(this.truncateText(record.content || record.text || record.description || 'No content', 30), 12, 'record'),
                         type: 'record',
                         color: this.getNodeColor('record'),
                         size: this.getNodeSize('record'),
@@ -248,6 +263,93 @@ class NetworkManager {
         return { nodes, edges };
     }
 
+    wrapLabelVertical(text) {
+        if (!text) return 'No content';
+        
+        const lines = [];
+        let currentSegment = '';
+        
+        // 遍历字符串中的每个字符
+        for (let i = 0; i < text.length; i++) {
+            const char = text[i];
+            const nextChar = text[i + 1];
+            
+            if (char === ' ') {
+                // 如果是空格，处理当前积累的片段
+                if (currentSegment) {
+                    lines.push(currentSegment);
+                    currentSegment = '';
+                }
+            } else if (/[\u4e00-\u9fa5]/.test(char)) {
+                // 如果当前字符是中文
+                if (currentSegment) {
+                    // 如果之前有积累的英文片段，先添加
+                    lines.push(currentSegment);
+                    currentSegment = '';
+                }
+                // 中文字符单独成行
+                lines.push(char);
+            } else {
+                // 英文字符，累积到当前片段
+                currentSegment += char;
+                
+                // 如果下一个字符是中文，当前片段结束
+                if (nextChar && /[\u4e00-\u9fa5]/.test(nextChar)) {
+                    lines.push(currentSegment);
+                    currentSegment = '';
+                }
+            }
+        }
+        
+        // 处理最后可能剩余的片段
+        if (currentSegment) {
+            lines.push(currentSegment);
+        }
+        
+        return lines.join('\n');
+    }
+
+    wrapLabel(text, maxLength, nodeType) {
+        if (!text) return 'No content';
+        
+        // Split text into words
+        const words = text.split(' ');
+        const lines = [];
+        let currentLine = '';
+        
+        // Process each word
+        for (const word of words) {
+            // If adding this word would exceed maxLength
+            if ((currentLine + ' ' + word).length > maxLength) {
+                // If current line is not empty, push it and start new line
+                if (currentLine) {
+                    lines.push(currentLine);
+                    currentLine = word;
+                } else {
+                    // If word itself is too long, truncate it
+                    currentLine = word.substring(0, maxLength - 3) + '...';
+                }
+            } else {
+                // Add word to current line
+                currentLine = currentLine ? currentLine + ' ' + word : word;
+            }
+        }
+        
+        // Add the last line if not empty
+        if (currentLine) {
+            lines.push(currentLine);
+        }
+        
+        // For record nodes, limit to max 2 lines and add ellipsis if needed
+        if (nodeType !== 'intent' && lines.length > 2) {
+            lines.length = 2;
+            lines[1] = lines[1].substring(0, maxLength - 3) + '...';
+        }
+        
+        // Join lines with newline character
+        return lines.join('\n');
+    }
+
     // 辅助方法：截断文本
     truncateText(text, maxLength) {
         if (!text) {
@@ -260,13 +362,125 @@ class NetworkManager {
 
     // 辅助方法：格式化记录的悬停提示
     formatRecordTooltip(record) {
-        const content = record.content?.trim() || 'N/A';
-        const context = record.context?.trim() || 'N/A';
-        const comment = record.comment?.trim() || 'N/A';
+        const tooltipContainer = document.createElement('div');
         
-        return `Content: ${content}
-Context: ${context}
-Comment: ${comment}`;
+        // 获取network容器的大小
+        const networkContainer = this.container;
+        const containerRect = networkContainer.getBoundingClientRect();
+        const maxHeight = Math.min(300, containerRect.height * 0.8); // 最大高度为容器高度的80%
+        const maxWidth = Math.min(400, containerRect.width * 0.8);  // 最大宽度为容器宽度的80%
+
+        Object.assign(tooltipContainer.style, {
+            backgroundColor: 'rgba(255, 255, 255, 0.98)',
+            borderRadius: '8px',
+            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.1)',
+            padding: '12px',
+            maxWidth: maxWidth + 'px',
+            maxHeight: maxHeight + 'px',
+            fontSize: '14px',
+            lineHeight: '1.5',
+            color: '#333',
+            backdropFilter: 'blur(8px)',
+            border: '1px solid rgba(0, 0, 0, 0.1)',
+            overflowY: 'auto',
+            overflowX: 'hidden',
+            position: 'relative'
+        });
+
+        // 添加滚动事件处理
+        let isScrolling = false;
+        tooltipContainer.addEventListener('wheel', (e) => {
+            const canScroll = tooltipContainer.scrollHeight > tooltipContainer.clientHeight;
+            if (canScroll) {
+                e.stopPropagation();
+                e.preventDefault();
+                tooltipContainer.scrollTop += e.deltaY;
+                
+                // 标记正在滚动
+                isScrolling = true;
+                clearTimeout(this._scrollTimeout);
+                this._scrollTimeout = setTimeout(() => {
+                    isScrolling = false;
+                }, 150);
+
+                // 当正在滚动时临时禁用network的缩放
+                if (this.network) {
+                    this.network.setOptions({
+                        interaction: {
+                            zoomView: !isScrolling
+                        }
+                    });
+                }
+            }
+        }, { passive: false });
+
+        // 创建并添加内容部分
+        if (record.content) {
+            const contentSection = this.createTooltipSection('Content', record.content, '#2196F3');
+            tooltipContainer.appendChild(contentSection);
+        }
+
+        // 创建并添加评论部分
+        if (record.comment) {
+            const commentSection = this.createTooltipSection('Comment', record.comment, '#FF9800');
+            tooltipContainer.appendChild(commentSection);
+        }
+
+        return tooltipContainer;
+    }
+
+    // 辅助方法：格式化记录的悬停提示部分
+    createTooltipSection(title, content, color) {
+        const section = document.createElement('div');
+        Object.assign(section.style, {
+            marginBottom: title === 'Comment' ? '0' : '16px'
+        });
+
+        // 创建标题
+        const titleElement = document.createElement('div');
+        Object.assign(titleElement.style, {
+            fontWeight: '600',
+            color: color,
+            marginBottom: '8px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            position: 'sticky',
+            top: '0',
+            backgroundColor: 'rgba(255, 255, 255, 0.98)',
+            paddingBottom: '4px',
+            borderBottom: '1px solid rgba(0, 0, 0, 0.05)'
+        });
+
+        // 添加图标
+        const icon = document.createElement('span');
+        icon.textContent = title === 'Content' ? '📝' : '💭';
+        icon.style.fontSize = '14px';
+        titleElement.appendChild(icon);
+
+        // 添加标题文本
+        const titleText = document.createElement('span');
+        titleText.textContent = title;
+        titleElement.appendChild(titleText);
+
+        // 创建内容
+        const contentElement = document.createElement('div');
+        Object.assign(contentElement.style, {
+            color: '#666',
+            fontSize: '13px',
+            lineHeight: '1.6',
+            padding: '8px 12px',
+            backgroundColor: 'rgba(0, 0, 0, 0.02)',
+            borderRadius: '6px',
+            whiteSpace: 'pre-wrap',  // 保留换行和空格
+            wordBreak: 'break-word'  // 长单词换行
+        });
+        contentElement.textContent = content;
+
+        section.appendChild(titleElement);
+        section.appendChild(contentElement);
+
+        return section;
     }
 
     // 获取节点颜色
@@ -282,11 +496,11 @@ Comment: ${comment}`;
     // 获取节点大小
     getNodeSize(type) {
         const sizes = {
-            root: 30,    // 根节点最大
-            intent: 25,  // 意图节点中等
-            record: 20   // 记录节点最小
+            root: 30,
+            intent: 15,
+            record: 10
         };
-        return sizes[type] || 15;
+        return sizes[type] || 10;
     }
 
     // 更新节点状态
@@ -363,15 +577,18 @@ Comment: ${comment}`;
         menu.id = 'nodeMenu';
         Object.assign(menu.style, {
             position: 'fixed',
-            transform: 'translate(-50%, -100%)', // 水平居中并向上偏移菜单自身高度
+            transform: 'translate(-50%, -100%)',
             left: x + 'px',
             top: y + 'px',
             backgroundColor: 'white',
-            border: '1px solid #ccc',
-            borderRadius: '4px',
-            padding: '5px',
-            boxShadow: '0 2px 5px rgba(0,0,0,0.2)',
-            zIndex: '10001'
+            border: 'none',
+            borderRadius: '8px',
+            padding: '8px 0',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+            zIndex: '10001',
+            minWidth: '150px',
+            backdropFilter: 'blur(8px)',
+            transition: 'opacity 0.2s ease-in-out'
         });
     }
 
@@ -439,13 +656,40 @@ Comment: ${comment}`;
     createMenuItem(nodeId, text, color, hoverColor) {
         const item = document.createElement('div');
         Object.assign(item.style, {
-            padding: '5px 10px',
+            padding: '8px 16px',
             cursor: 'pointer',
             color: color,
+            fontSize: '14px',
             fontWeight: '500',
-            borderBottom: text.includes('Confirmed') ? '1px solid #eee' : 'none'
+            transition: 'all 0.2s ease',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            userSelect: 'none'
         });
-        item.textContent = text;
+        
+        // 添加图标和文本的容器
+        const content = document.createElement('div');
+        content.style.display = 'flex';
+        content.style.alignItems = 'center';
+        content.style.gap = '8px';
+        
+        // 根据操作类型添加不同的图标
+        const icon = document.createElement('span');
+        icon.style.fontSize = '16px';
+        if (text.includes('Delete')) {
+            icon.innerHTML = '';
+        } else if (text.includes('Add')) {
+            icon.innerHTML = '';
+        } else if (text.includes('Edit')) {
+            icon.innerHTML = '';
+        } else {
+            icon.innerHTML = '';
+        }
+        
+        content.appendChild(icon);
+        content.appendChild(document.createTextNode(text));
+        item.appendChild(content);
 
         this.setupMenuItemEvents(item, color, hoverColor);
         this.setupMenuItemAction(item, nodeId, text);
@@ -456,12 +700,19 @@ Comment: ${comment}`;
     // 设置菜单项事件
     setupMenuItemEvents(item, color, hoverColor) {
         item.addEventListener('mouseover', () => {
-            item.style.backgroundColor = '#f0f0f0';
-            item.style.color = hoverColor;
+            Object.assign(item.style, {
+                backgroundColor: '#f5f5f5',
+                color: hoverColor,
+                transform: 'translateX(4px)'
+            });
         });
+        
         item.addEventListener('mouseout', () => {
-            item.style.backgroundColor = 'white';
-            item.style.color = color;
+            Object.assign(item.style, {
+                backgroundColor: 'transparent',
+                color: color,
+                transform: 'translateX(0)'
+            });
         });
     }
 
@@ -706,39 +957,115 @@ Comment: ${comment}`;
         const baseOptions = {
             nodes: {
                 shape: 'dot',
-                size: 16,
+                size: 12,  // 将默认大小从16减小到12
                 font: {
                     size: 14,
-                    color: '#333'
+                    color: '#333333',
+                    face: 'system-ui, -apple-system, sans-serif',
+                    multi: true,
+                    background: {
+                        enabled: true,
+                        color: 'rgba(255, 255, 255, 0.85)',
+                        size: 6,
+                        strokeWidth: 0
+                    },
+                    align: 'center',
+                    vadjust: 8
                 },
                 borderWidth: 2,
-                shadow: true
+                shadow: true,
+                fixed: false,
+                scaling: {
+                    label: {
+                        enabled: true,
+                        min: 12,
+                        max: 16
+                    }
+                }
             },
             edges: {
                 width: 2,
                 smooth: {
-                    type: 'continuous'
+                    type: 'cubicBezier',
+                    forceDirection: this.layout === 'hierarchical' ? 
+                        (NetworkManager.hierarchicalDirection === 'LR' ? 'horizontal' : 'vertical') : 
+                        'none'
                 },
                 arrows: {
                     to: { enabled: true, scaleFactor: 0.5 }
                 }
             },
-            physics: {
-                enabled: true,
-                stabilization: {
-                    enabled: true,
-                    iterations: 1000
-                },
-                hierarchicalRepulsion: {
-                    nodeDistance: 120
-                }
-            },
             interaction: {
-                dragNodes: function (node) {
-                    return node.id !== 'root'; // 禁止拖动根节点
-                }
+                dragNodes: true,
+                dragView: true,
+                zoomView: true,
+                hover: true,
+                selectable: true,
+                hideEdgesOnDrag: false,
+                hideEdgesOnZoom: false,
+                hover: true,
+                multiselect: false,
+                selectConnectedEdges: true,
+                hoverConnectedEdges: true,
+                zoomSpeed: 0.3  // 添加这个配置来减慢缩放速度
+            },
+            layout: {
+                randomSeed: 1,
+                improvedLayout: true
             }
         };
+
+        // 根据布局类型设置不同的布局参数
+        if (this.layout === 'hierarchical') {
+            baseOptions.layout = {
+                hierarchical: {
+                    direction: NetworkManager.hierarchicalDirection, // 使用静态变量
+                    sortMethod: 'directed',
+                    levelSeparation: 150,
+                    nodeSpacing: 100,
+                    treeSpacing: 150,
+                    blockShifting: true,
+                    edgeMinimization: true,
+                    parentCentralization: true
+                }
+            };
+            // 在层级布局中禁用物理引擎以允许自由拖动
+            baseOptions.physics = {
+                enabled: false
+            };
+        } else {
+            // 力导向布局的物理引擎参数
+            baseOptions.physics = {
+                enabled: true,
+                barnesHut: {
+                    gravitationalConstant: -3000,
+                    centralGravity: 0.5,
+                    springLength: 130,
+                    springConstant: 0.08,
+                    damping: 0.09,
+                    avoidOverlap: 1
+                },
+                stabilization: {
+                    enabled: true,
+                    iterations: 1000,
+                    updateInterval: 50
+                }
+            };
+        }
+
+        // 设置根节点固定在左侧
+        const containerWidth = this.visContainer.clientWidth;
+        const containerHeight = this.visContainer.clientHeight;
+        this.nodes.get().forEach(node => {
+            if (node.id === 'root') {
+                this.nodes.update({
+                    id: node.id,
+                    fixed: true,
+                    x: -containerWidth * 0.3,  // 将根节点固定在容器左侧30%的位置
+                    y: containerHeight * 0.5    // 垂直居中
+                });
+            }
+        });
 
         // 为侧边栏模式添加特殊配置
         if (this.displayMode === 'sidepanel') {
@@ -746,33 +1073,11 @@ Comment: ${comment}`;
                 ...baseOptions,
                 nodes: {
                     ...baseOptions.nodes,
-                    size: 12, // 更小的节点
+                    size: 12,
                     font: {
-                        size: 12, // 更小的字体
+                        size: 12,
                         color: '#333'
                     }
-                },
-                physics: {
-                    ...baseOptions.physics,
-                    stabilization: {
-                        enabled: true,
-                        iterations: 500 // 减少迭代次数以加快加载
-                    },
-                    barnesHut: {
-                        gravitationalConstant: -2000,
-                        centralGravity: 0.1,
-                        springLength: 95,
-                        springConstant: 0.04,
-                        damping: 0.09
-                    }
-                },
-                interaction: {
-                    dragNodes: true,
-                    dragView: true,
-                    zoomView: true,
-                    hover: true,
-                    multiselect: false,
-                    keyboard: false
                 }
             };
         }
@@ -782,14 +1087,66 @@ Comment: ${comment}`;
 
     // 设置网络事件
     setupNetworkEvents() {
+        let isTooltipVisible = false;
+        let tooltipNode = null;
+
         // 点击节点显示菜单
         this.network.on('click', (params) => {
             if (params.nodes.length > 0) {
                 const nodeId = params.nodes[0];
-                // 直接使用节点位置创建菜单
                 this.createNodeMenu(nodeId);
             }
         });
+
+        // 监听悬停事件
+        this.network.on('hoverNode', (params) => {
+            tooltipNode = params.node;
+            isTooltipVisible = true;
+            // 禁用缩放
+            this.network.setOptions({
+                interaction: {
+                    zoomView: false
+                }
+            });
+        });
+
+        // 监听悬停结束事件
+        this.network.on('blurNode', (params) => {
+            if (params.node === tooltipNode) {
+                tooltipNode = null;
+                isTooltipVisible = false;
+                // 恢复缩放
+                this.network.setOptions({
+                    interaction: {
+                        zoomView: true
+                    }
+                });
+            }
+        });
+
+        // 监听滚轮事件
+        this.visContainer.addEventListener('wheel', (event) => {
+            if (isTooltipVisible) {
+                // 如果提示框可见，检查事件目标
+                let target = event.target;
+                let isInsideTooltip = false;
+
+                // 检查事件是否发生在提示框内
+                while (target && target !== this.visContainer) {
+                    if (target.classList.contains('vis-tooltip')) {
+                        isInsideTooltip = true;
+                        break;
+                    }
+                    target = target.parentElement;
+                }
+
+                // 如果不在提示框内，阻止事件
+                if (!isInsideTooltip) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                }
+            }
+        }, { passive: false });
 
         // 添加拖动开始事件
         this.network.on('dragStart', (params) => {
@@ -909,8 +1266,7 @@ Comment: ${comment}`;
                 this.containerArea.classList.remove('with-network');
                 // 重置容器区域样式
                 Object.assign(this.containerArea.style, {
-                    width: "40vw",
-                    maxWidth: "600px"
+                    width: "40vw"
                 });
                 
                 // 重置记录列表容器样式
@@ -932,6 +1288,163 @@ Comment: ${comment}`;
             position: "relative",
             overflow: "hidden"
         });
+        
+        // 添加工具栏
+        const toolbar = document.createElement("div");
+        Object.assign(toolbar.style, {
+            position: "absolute",
+            top: "10px",
+            right: "10px",
+            zIndex: "1000",
+            display: "flex",
+            alignItems: "center",
+            gap: "10px",
+            padding: "5px",
+            backgroundColor: "rgba(255, 255, 255, 0.9)",
+            borderRadius: "6px",
+            boxShadow: "0 2px 6px rgba(0, 0, 0, 0.1)"
+        });
+
+        // 添加方向切换开关
+        const directionSwitch = document.createElement("div");
+        Object.assign(directionSwitch.style, {
+            display: "flex",
+            alignItems: "center",
+            background: "#f5f5f5",
+            borderRadius: "6px",
+            padding: "2px",
+            cursor: "pointer",
+            userSelect: "none",
+            boxShadow: "0 1px 3px rgba(0, 0, 0, 0.1)"
+        });
+
+        const horizontalSvg = `
+        <svg width="16" height="16" viewBox="0 0 80 70" fill="none">
+            <!-- Root node -->
+            <circle cx="10" cy="35" r="4" fill="currentColor"/>
+            <!-- Leaf nodes -->
+            <circle cx="70" cy="15" r="4" fill="currentColor"/>
+            <circle cx="70" cy="35" r="4" fill="currentColor"/>
+            <circle cx="70" cy="55" r="4" fill="currentColor"/>
+            <!-- Curved paths -->
+            <path d="M 14 35 C 35 35, 45 15, 66 15" stroke="currentColor" fill="none" stroke-width="2"/>
+            <path d="M 14 35 C 35 35, 45 35, 66 35" stroke="currentColor" fill="none" stroke-width="2"/>
+            <path d="M 14 35 C 35 35, 45 55, 66 55" stroke="currentColor" fill="none" stroke-width="2"/>
+        </svg>`;
+
+        const verticalSvg = `
+        <svg width="16" height="16" viewBox="0 0 70 80" fill="none">
+            <!-- Root node -->
+            <circle cx="35" cy="10" r="4" fill="currentColor"/>
+            <!-- Leaf nodes -->
+            <circle cx="15" cy="70" r="4" fill="currentColor"/>
+            <circle cx="35" cy="70" r="4" fill="currentColor"/>
+            <circle cx="55" cy="70" r="4" fill="currentColor"/>
+            <!-- Curved paths -->
+            <path d="M 35 14 C 35 35, 15 45, 15 66" stroke="currentColor" fill="none" stroke-width="2"/>
+            <path d="M 35 14 C 35 35, 35 45, 35 66" stroke="currentColor" fill="none" stroke-width="2"/>
+            <path d="M 35 14 C 35 35, 55 45, 55 66" stroke="currentColor" fill="none" stroke-width="2"/>
+        </svg>`;
+
+        const horizontalBtn = document.createElement("div");
+        const verticalBtn = document.createElement("div");
+
+        const btnStyle = {
+            padding: "2px 4px",
+            fontSize: "12px",
+            borderRadius: "4px",
+            transition: "all 0.2s ease",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: "16px",
+            height: "16px"
+        };
+
+        Object.assign(horizontalBtn.style, {
+            ...btnStyle,
+            backgroundColor: NetworkManager.hierarchicalDirection === 'LR' ? "#fff" : "transparent",
+            color: NetworkManager.hierarchicalDirection === 'LR' ? "#333" : "#666",
+            boxShadow: NetworkManager.hierarchicalDirection === 'LR' ? "0 1px 3px rgba(0, 0, 0, 0.1)" : "none"
+        });
+        horizontalBtn.innerHTML = horizontalSvg;
+        horizontalBtn.title = "Horizontal Layout";
+
+        Object.assign(verticalBtn.style, {
+            ...btnStyle,
+            backgroundColor: NetworkManager.hierarchicalDirection === 'UD' ? "#fff" : "transparent",
+            color: NetworkManager.hierarchicalDirection === 'UD' ? "#333" : "#666",
+            boxShadow: NetworkManager.hierarchicalDirection === 'UD' ? "0 1px 3px rgba(0, 0, 0, 0.1)" : "none"
+        });
+        verticalBtn.innerHTML = verticalSvg;
+        verticalBtn.title = "Vertical Layout";
+
+        const updateButtonStyles = (isHorizontal) => {
+            Object.assign(horizontalBtn.style, {
+                backgroundColor: isHorizontal ? "#fff" : "transparent",
+                color: isHorizontal ? "#333" : "#666",
+                boxShadow: isHorizontal ? "0 1px 3px rgba(0, 0, 0, 0.1)" : "none"
+            });
+            Object.assign(verticalBtn.style, {
+                backgroundColor: !isHorizontal ? "#fff" : "transparent",
+                color: !isHorizontal ? "#333" : "#666",
+                boxShadow: !isHorizontal ? "0 1px 3px rgba(0, 0, 0, 0.1)" : "none"
+            });
+        };
+
+        horizontalBtn.addEventListener("click", () => {
+            if (NetworkManager.hierarchicalDirection !== 'LR') {
+                NetworkManager.hierarchicalDirection = 'LR';
+                updateButtonStyles(true);
+                
+                // 如果当前是层级布局，立即更新视图
+                if (this.layout === 'hierarchical' && this.network) {
+                    this.network.setOptions({
+                        layout: {
+                            hierarchical: {
+                                direction: NetworkManager.hierarchicalDirection
+                            }
+                        },
+                        edges: {
+                            smooth: {
+                                type: 'cubicBezier',
+                                forceDirection: 'horizontal'
+                            }
+                        }
+                    });
+                }
+            }
+        });
+
+        verticalBtn.addEventListener("click", () => {
+            if (NetworkManager.hierarchicalDirection !== 'UD') {
+                NetworkManager.hierarchicalDirection = 'UD';
+                updateButtonStyles(false);
+                
+                // 如果当前是层级布局，立即更新视图
+                if (this.layout === 'hierarchical' && this.network) {
+                    this.network.setOptions({
+                        layout: {
+                            hierarchical: {
+                                direction: NetworkManager.hierarchicalDirection
+                            }
+                        },
+                        edges: {
+                            smooth: {
+                                type: 'cubicBezier',
+                                forceDirection: 'vertical'
+                            }
+                        }
+                    });
+                }
+            }
+        });
+
+        directionSwitch.appendChild(horizontalBtn);
+        directionSwitch.appendChild(verticalBtn);
+        toolbar.appendChild(directionSwitch);
+        
+        this.container.appendChild(toolbar);
         this.container.appendChild(this.visContainer);
         
         const loader = document.createElement("div");
@@ -982,7 +1495,7 @@ Comment: ${comment}`;
 
     // 设置关闭按钮样式
     setupCloseButtonStyle(closeBtn) {
-        closeBtn.textContent = "×";
+        closeBtn.textContent = "";
         Object.assign(closeBtn.style, {
             position: "absolute",
             right: "10px",
@@ -1194,7 +1707,12 @@ async function saveIntentTree(intentTree) {
 
 
 // 主函数
-async function showNetworkVisualization(intentTree, containerArea = null, mode = 'standalone') {
+/**
+ * @param {string} layout - 布局方式：
+ *   'force' - 力导向图布局（默认），节点位置由物理引擎动态计算
+ *   'hierarchical' - 层级树状图布局，自上而下展示层级关系
+ */
+async function showNetworkVisualization(intentTree, containerArea = null, mode = 'standalone', layout = 'force') {
     try {
         if (typeof vis === 'undefined') {
             console.error('Vis.js not loaded');
@@ -1204,12 +1722,13 @@ async function showNetworkVisualization(intentTree, containerArea = null, mode =
 
         console.log('Visualization data:', intentTree);
         console.log('networkVisualizationContainer mode:', mode);
+        console.log('Layout mode:', layout);
 
         // save intentTree
         await saveIntentTree(intentTree);
         
         this.intentTree = intentTree;
-        const networkManager = new NetworkManager(intentTree, containerArea, mode);
+        const networkManager = new NetworkManager(intentTree, containerArea, mode, layout);
         networkManager.initContainer();
         networkManager.initializeNodes();
         networkManager.initializeNetwork();
